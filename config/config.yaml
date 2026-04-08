@@ -1,0 +1,26 @@
+kafka:
+  bootstrap_servers: localhost:9092
+  topic: financial_transactions
+  group_id: stream_processor
+
+database:
+  host: localhost
+  port: 5432
+  name: financial_dwh
+  user: admin
+  password: admin123
+
+pipeline:
+  db_file: data/financial_dwh.db
+  transactions_per_second: 10
+  run_duration_seconds: 60
+  poll_interval_seconds: 60
+
+alphavantage:
+  api_key: KNU7CL0FVGWSDICI
+  symbols:
+    - AAPL
+    - GOOGL
+    - MSFT
+    - AMZN
+    - TSLA
