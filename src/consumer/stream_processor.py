@@ -9,14 +9,14 @@ import yaml
 
 
 def load_config():
-    with open('config/config.yaml') as f:
+    with open("config/config.yaml") as f:
         return yaml.safe_load(f)
 
 
 def get_db_engine(config):
-    db = config['database']
+    db = config["database"]
     return create_engine(
-        f"postgresql+psycopg2://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['name']}"
+        "postgresql+psycopg2://" + db["user"] + ":" + db["password"] + "@" + db["host"] + ":" + str(db["port"]) + "/" + db["name"]
     )
 
 
@@ -41,56 +41,106 @@ def create_stock_table(engine):
     with engine.connect() as conn:
         conn.execute(text(sql))
         conn.commit()
-    print('Stock quotes table ready')
+    print("Stock quotes table ready")
+
+
+def validate_batch(df):
+    print("  Running data quality checks...")
+    checks = []
+
+    def check(name, passed, detail=""):
+        status = "PASS" if passed else "FAIL"
+        print("    [" + status + "] " + name + " " + detail)
+        checks.append(passed)
+
+    check("No null symbols",
+          df["symbol"].notna().all(),
+          "(" + str(df["symbol"].isna().sum()) + " nulls)")
+
+    check("No null transaction_ids",
+          df["transaction_id"].notna().all(),
+          "(" + str(df["transaction_id"].isna().sum()) + " nulls)")
+
+    check("Price is positive",
+          (pd.to_numeric(df["price"], errors="coerce") > 0).all(),
+          "(min=" + str(round(pd.to_numeric(df["price"], errors="coerce").min(), 2)) + ")")
+
+    check("Volume is positive",
+          (pd.to_numeric(df["volume"], errors="coerce") >= 0).all(),
+          "(min=" + str(pd.to_numeric(df["volume"], errors="coerce").min()) + ")")
+
+    check("Symbol is valid stock",
+          df["symbol"].isin(["AAPL","GOOGL","MSFT","AMZN","TSLA"]).all(),
+          "(found: " + str(df["symbol"].unique().tolist()) + ")")
+
+    check("Timestamp is parseable",
+          pd.to_datetime(df["timestamp"], errors="coerce").notna().all(),
+          "")
+
+    passed = sum(checks)
+    total  = len(checks)
+    print("  Result: " + str(passed) + "/" + str(total) + " checks passed")
+    return passed == total
 
 
 def process_batch(messages, engine, db_file):
     if not messages:
         return {}
+
     df = pd.DataFrame(messages)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['processed_at'] = datetime.utcnow()
-    df['change_pct'] = pd.to_numeric(df['change_pct'], errors='coerce')
+    df["timestamp"]    = pd.to_datetime(df["timestamp"])
+    df["processed_at"] = datetime.utcnow()
+    df["change_pct"]   = pd.to_numeric(df["change_pct"], errors="coerce")
+    df["price"]        = pd.to_numeric(df["price"], errors="coerce")
+    df["volume"]       = pd.to_numeric(df["volume"], errors="coerce")
+
+    is_valid = validate_batch(df)
+
+    if not is_valid:
+        print("  WARNING: Some checks failed - filtering invalid records")
+        df = df[df["price"] > 0]
+        df = df[df["symbol"].isin(["AAPL","GOOGL","MSFT","AMZN","TSLA"])]
+        df = df.dropna(subset=["transaction_id","symbol","price"])
 
     try:
-        df.to_sql('stock_quotes', engine, if_exists='append', index=False, method='multi')
-        print(f'  Loaded {len(df)} quotes to PostgreSQL')
+        df.to_sql("stock_quotes", engine, if_exists="append", index=False, method="multi")
+        print("  Loaded " + str(len(df)) + " quotes to PostgreSQL")
     except Exception as e:
-        print(f'  PostgreSQL error: {e}')
+        print("  PostgreSQL error: " + str(e))
 
     conn = sqlite3.connect(db_file)
-    df.to_sql('stock_quotes', conn, if_exists='append', index=False)
+    df.to_sql("stock_quotes", conn, if_exists="append", index=False)
     conn.close()
 
     return {
-        'total_quotes': len(df),
-        'symbols': df['symbol'].unique().tolist(),
-        'avg_price': round(df['price'].mean(), 2),
-        'flagged': int(df['is_flagged'].sum()),
+        "total_quotes": len(df),
+        "symbols":      df["symbol"].unique().tolist(),
+        "avg_price":    round(df["price"].mean(), 2),
+        "flagged":      int(df["is_flagged"].sum()),
     }
 
 
 def run_consumer(duration_seconds=3600):
-    config = load_config()
-    engine = get_db_engine(config)
-    db_file = config['pipeline']['db_file']
-    topic = config['kafka']['topic']
+    config  = load_config()
+    engine  = get_db_engine(config)
+    db_file = config["pipeline"]["db_file"]
+    topic   = config["kafka"]["topic"]
 
     create_stock_table(engine)
 
     consumer = KafkaConsumer(
         topic,
-        bootstrap_servers=config['kafka']['bootstrap_servers'],
-        group_id=config['kafka']['group_id'],
-        value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-        auto_offset_reset='earliest',
+        bootstrap_servers=config["kafka"]["bootstrap_servers"],
+        group_id=config["kafka"]["group_id"],
+        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+        auto_offset_reset="earliest",
         consumer_timeout_ms=5000,
     )
 
-    print(f'Consumer started - listening to topic: {topic}')
-    start_time = time.time()
+    print("Consumer started - listening to topic: " + topic)
+    start_time      = time.time()
     total_processed = 0
-    batch = []
+    batch           = []
 
     while time.time() - start_time < duration_seconds:
         try:
@@ -102,11 +152,12 @@ def run_consumer(duration_seconds=3600):
             pass
 
         if batch:
+            print("Processing batch of " + str(len(batch)) + " messages...")
             summary = process_batch(batch, engine, db_file)
             total_processed += len(batch)
-            print(f'  Processed {len(batch)} quotes | Total: {total_processed} | Symbols: {summary.get("symbols",[])}')
+            print("  Total processed: " + str(total_processed) + " | Symbols: " + str(summary.get("symbols",[])))
             batch = []
 
     consumer.close()
-    print(f'Consumer complete - {total_processed} quotes processed')
+    print("Consumer complete - " + str(total_processed) + " quotes processed")
     return total_processed
